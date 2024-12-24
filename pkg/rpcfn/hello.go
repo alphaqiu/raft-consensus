@@ -9,14 +9,15 @@ import (
 )
 
 type HelloRequest struct {
-	Name string `json:"name"`
-	Addr string `json:"addr"` // host:port
+	Name  string   `json:"name"`
+	Addrs []string `json:"addrs"` // remote node + remote node connected peers -> host:port
 }
 
 type HelloResponse struct {
 	*Reply
 }
 
+// Application 是一个测试结构体
 type Application struct {
 	logger *zap.Logger
 }

@@ -10,6 +10,7 @@ import (
 type RemoteResolver interface {
 	RemoteAddrs() ([]string, error)
 	AddPeer(ctx context.Context, addr string) error
+	Peers() []Peer
 }
 
 func NewMethods(logger *zap.Logger, resolver RemoteResolver) *Methods {
@@ -22,35 +23,34 @@ type Methods struct {
 }
 
 func (m *Methods) Hello(req *HelloRequest, resp *HelloResponse) error {
-	m.logger.Info("Starting invoke Hello method", zap.Any("req", req))
-	defer m.logger.Info("End invoke Hello method", zap.Any("resp", resp))
+	// m.logger.Info("Starting invoke Hello method", zap.Any("req", req))
+	// defer m.logger.Info("End invoke Hello method", zap.Any("resp", resp))
 	addrs, err := m.resolver.RemoteAddrs()
 	if err != nil {
 		m.logger.Error("failed to get remote addrs", zap.Error(err))
 		return err
 	}
 
-	if slices.Contains(addrs, req.Addr) {
-		m.logger.Info("Hello method already connected to this peer", zap.String("addr", req.Addr))
-		resp.Reply = &Reply{
-			Code: 0,
-			Msg:  "success",
+	for _, addr := range req.Addrs {
+		if slices.Contains(addrs, addr) {
+			// m.logger.Info("Hello method already connected to this peer", zap.String("addr", addr))
+			continue
 		}
-		return nil
-	}
 
-	m.logger.Info("Hello method starting to add remote peer", zap.String("addr", req.Addr))
-	err = m.resolver.AddPeer(context.Background(), req.Addr)
-	if err != nil && err != ErrPeerAlreadyExists {
-		m.logger.Error("failed to add peer", zap.Error(err))
-		return nil
-	}
+		// m.logger.Info("Hello method starting to add remote peer", zap.String("addr", addr))
+		err = m.resolver.AddPeer(context.Background(), addr)
+		if err != nil && err != ErrPeerAlreadyExists {
+			// m.logger.Error("failed to add peer", zap.Error(err))
+			continue
+		}
 
-	m.logger.Info("Hello method added remote peer successfully", zap.String("addr", req.Addr))
+		// m.logger.Info("Hello method added remote peer successfully", zap.String("addr", addr))
+	}
 	resp.Reply = &Reply{
 		Code: 0,
 		Msg:  "success",
 	}
+
 	return nil
 }
 

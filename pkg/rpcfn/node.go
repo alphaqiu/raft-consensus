@@ -17,7 +17,7 @@ var (
 
 type Node struct {
 	localPeer   Peer
-	peers       map[string]Peer
+	peers       map[string]Peer // address -> peer
 	logger      *zap.Logger
 	peerMutex   sync.Mutex
 	runOnce     sync.Once
@@ -39,6 +39,7 @@ func (n *Node) Start(ctx context.Context) error {
 		n.localPeer = NewLocalPeer(n.rpcEndpoint, log, n)
 		http.HandleFunc("/add-peer", n.addPeer)
 		http.HandleFunc("/call-to-all", n.callToAll)
+		http.HandleFunc("/is-leader", n.isLeader)
 		go http.ListenAndServe(n.localHost, nil)
 	})
 	log.Info("node started", zap.String("rpc-addr", n.rpcEndpoint), zap.String("local-host", n.localHost))
@@ -60,6 +61,16 @@ func (n *Node) RemoteAddrs() ([]string, error) {
 	return allAddrs, nil
 }
 
+func (n *Node) Peers() []Peer {
+	n.peerMutex.Lock()
+	defer n.peerMutex.Unlock()
+	peers := []Peer{}
+	for _, peer := range n.peers {
+		peers = append(peers, peer)
+	}
+	return peers
+}
+
 func (n *Node) Stop(ctx context.Context) error {
 	return n.localPeer.Close(ctx)
 }
@@ -69,7 +80,7 @@ func (n *Node) AddPeer(ctx context.Context, addr string) (err error) {
 	if n.peers == nil {
 		n.peers = make(map[string]Peer)
 	}
-	n.logger.Info("node rev request to starting add a peer", zap.String("addr", addr))
+	// n.logger.Info("node rev request to starting add a peer", zap.String("addr", addr))
 
 	if _, ok := n.peers[addr]; ok {
 		defer n.peerMutex.Unlock()
@@ -85,14 +96,24 @@ func (n *Node) AddPeer(ctx context.Context, addr string) (err error) {
 		return err
 	}
 
-	n.logger.Info("node add a peer ->", zap.String("addr", addr))
+	// n.logger.Info("node add a peer ->", zap.String("addr", addr))
 	n.peers[peer.ID()] = peer
 	n.peerMutex.Unlock()
-	n.logger.Info("node add a peer successfully", zap.String("addr", addr))
+	// n.logger.Info("node add a peer successfully", zap.String("addr", addr))
 
 	// handshake and tell remote peer self ip and port
 	reply := &HelloResponse{}
-	err = peer.Call(ctx, "Methods.Hello", &HelloRequest{Name: "Hello", Addr: n.rpcEndpoint}, reply)
+	addrs, err := n.RemoteAddrs()
+	if err != nil {
+		n.logger.Error("the node failed to get remote addrs while calling method", zap.Error(err))
+		return err
+	}
+
+	if index := slices.Index(addrs, peer.ID()); index != -1 {
+		addrs = append(addrs[:index], addrs[index+1:]...)
+	}
+	addrs = append(addrs, n.rpcEndpoint)
+	err = peer.Call(ctx, "Methods.Hello", &HelloRequest{Name: "Hello", Addrs: addrs}, reply)
 	if err != nil {
 		n.logger.Error("the node failed to tell remote peer self ip and port, disconnect it",
 			zap.String("remote", addr),
@@ -120,7 +141,7 @@ func (n *Node) RemovePeer(ctx context.Context, addr string) error {
 func (n *Node) CallToAll(ctx context.Context, method string, args interface{}, reply interface{}) error {
 	n.peerMutex.Lock()
 	defer n.peerMutex.Unlock()
-	n.logger.Info("node invoke n.CallToAll", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
+	// n.logger.Info("node invoke n.CallToAll", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
 	err := n.localPeer.Call(ctx, method, args, reply)
 	if err != nil {
 		n.logger.Error("the node failed to call method",
@@ -132,24 +153,14 @@ func (n *Node) CallToAll(ctx context.Context, method string, args interface{}, r
 		return err
 	}
 
-	remoteAddrs, err := n.localPeer.RemoteAddrs()
-	if err != nil {
-		n.logger.Error("the node failed to get remote addrs while calling method", zap.Error(err))
-		return err
-	}
-
 	for _, peer := range n.peers {
-		if slices.Contains(remoteAddrs, peer.ID()) {
-			continue
-		}
-
-		n.logger.Debug("Calling node -> method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
+		// n.logger.Debug("Calling node -> method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
 		if err := peer.Call(ctx, method, args, reply); err != nil {
 			n.logger.Error("the node failed to call method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply), zap.Error(err))
 			continue
 		}
 
-		n.logger.Info("the node called method successfully", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
+		// n.logger.Info("the node called method successfully", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
 		return nil
 	}
 
@@ -209,16 +220,10 @@ func (n *Node) callToAll(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func mergeMapToAddrs(m1 map[string]Peer, m2 []string) []string {
-	slice := []string{}
-	for addr := range m1 {
-		slice = append(slice, addr)
+func (n *Node) isLeader(w http.ResponseWriter, _ *http.Request) {
+	if n.localPeer.IsLeader() {
+		w.Write([]byte("true"))
+	} else {
+		w.Write([]byte("false"))
 	}
-
-	for _, addr := range m2 {
-		if !slices.Contains(slice, addr) {
-			slice = append(slice, addr)
-		}
-	}
-	return slice
 }

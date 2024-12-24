@@ -25,28 +25,29 @@ type Peer interface {
 	Close(ctx context.Context) error
 	// Call 调用远程方法
 	Call(ctx context.Context, method string, args interface{}, reply interface{}) error
-	// RemoteAddrs 返回远程节点所连接的所有节点地址
-	RemoteAddrs() ([]string, error)
+	IsLeader() bool
 }
 
 type localPeer struct {
-	server  *rpc.Server
-	logger  *zap.Logger
-	addr    string
-	runOnce sync.Once
-	methods *Methods
+	server    *rpc.Server
+	logger    *zap.Logger
+	addr      string
+	runOnce   sync.Once
+	methods   *Methods
+	consensus *RaftConsensus
 }
 
 func NewLocalPeer(addr string, logger *zap.Logger, resolver RemoteResolver) Peer {
-	return &localPeer{logger: logger, addr: addr, methods: NewMethods(logger, resolver)}
+	return &localPeer{
+		logger:    logger,
+		addr:      addr,
+		methods:   NewMethods(logger, resolver),
+		consensus: NewConsensus(addr, logger, resolver),
+	}
 }
 
 func (p *localPeer) ID() string {
 	return p.addr
-}
-
-func (p *localPeer) RemoteAddrs() ([]string, error) {
-	return nil, nil
 }
 
 func (p *localPeer) Connect(ctx context.Context) (err error) {
@@ -59,6 +60,7 @@ func (p *localPeer) Connect(ctx context.Context) (err error) {
 			p.server = rpc.NewServer()
 			logger.Info("starting local peer: registering methods to server", zap.String("address", p.addr))
 			p.server.Register(p.methods)
+			p.server.Register(p.consensus)
 			listener, err := net.Listen("tcp", p.addr)
 			if err != nil {
 				logger.Error("failed to listen on address for starting local peer",
@@ -68,7 +70,9 @@ func (p *localPeer) Connect(ctx context.Context) (err error) {
 				return
 			}
 
+			logger.Info("starting local service listener and consensus", zap.String("address", p.addr))
 			go p.server.Accept(listener)
+			p.consensus.Start()
 			logger.Info("server started", zap.String("address", p.addr))
 		})
 	}
@@ -80,7 +84,14 @@ func (p *localPeer) Call(ctx context.Context, method string, req interface{}, re
 	return nil
 }
 
-func (p *localPeer) Close(ctx context.Context) error { return nil }
+func (p *localPeer) Close(ctx context.Context) error {
+	p.consensus.Stop()
+	return nil
+}
+
+func (p *localPeer) IsLeader() bool {
+	return p.consensus.state.Load() == Leader
+}
 
 type remotePeer struct {
 	client      *rpc.Client
@@ -94,10 +105,6 @@ type remotePeer struct {
 
 func (p *remotePeer) ID() string {
 	return p.addr
-}
-
-func (p *remotePeer) RemoteAddrs() ([]string, error) {
-	return []string{p.addr}, nil
 }
 
 func NewRemotePeer(addr string, logger *zap.Logger, retryTimes int) Peer {
@@ -144,8 +151,8 @@ func (p *remotePeer) Call(ctx context.Context, method string, args interface{}, 
 	if !p.connected {
 		return errors.New("remote peer not connected yet")
 	}
-	p.logger.Info("Calling remote peer -> method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
-	defer p.logger.Info("Called remote peer -> method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
+	// p.logger.Info("Calling remote peer -> method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
+	// defer p.logger.Info("Called remote peer -> method", zap.String("method", method), zap.Any("args", args), zap.Any("reply", reply))
 	return p.client.Call(method, args, reply)
 }
 
@@ -164,4 +171,9 @@ func (p *remotePeer) Close(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// IsLeader DO NOT USE THIS METHOD
+func (p *remotePeer) IsLeader() bool {
+	return false
 }

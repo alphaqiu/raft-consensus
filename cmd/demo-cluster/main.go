@@ -43,6 +43,12 @@ var callCmd = &cobra.Command{
 	Run:   call,
 }
 
+var isLeaderCmd = &cobra.Command{
+	Use:   "is-leader",
+	Short: "is-leader is a tool for checking if the node is leader",
+	Run:   isLeader,
+}
+
 // 测试命令，用于测试节点是否正常工作
 var nnnCmd = &cobra.Command{
 	Use:   "nnn",
@@ -58,7 +64,7 @@ func init() {
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 	rootCmd.PersistentFlags().String("addr", "127.0.0.1:12345", "the address to rpc listen on")
 	rootCmd.PersistentFlags().String("host", "127.0.0.1:9010", "the address of the peer to add peer")
-	rootCmd.AddCommand(runCmd, addPeerCmd, callCmd, nnnCmd)
+	rootCmd.AddCommand(runCmd, addPeerCmd, callCmd, nnnCmd, isLeaderCmd)
 }
 
 func main() {
@@ -167,6 +173,26 @@ func getAddrs(cmd *cobra.Command) (string, string) {
 		return "", ""
 	}
 	return addr, host
+}
+
+func isLeader(cmd *cobra.Command, _ []string) {
+	_, host := getAddrs(cmd)
+	if host == "" {
+		logger.Error("failed to get host")
+		return
+	}
+	resp, err := http.Get(fmt.Sprintf("http://%s/is-leader", host))
+	if err != nil {
+		logger.Error("failed to get is-leader", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Error("failed to read response body", zap.Error(err))
+		return
+	}
+	logger.Info("is-leader response", zap.String("resp", string(body)))
 }
 
 // nnn is a tool for testing
