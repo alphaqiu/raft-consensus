@@ -3,6 +3,7 @@ package rpcfn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -39,7 +40,7 @@ func (n *Node) Start(ctx context.Context) error {
 		n.localPeer = NewLocalPeer(n.rpcEndpoint, log, n)
 		http.HandleFunc("/add-peer", n.addPeer)
 		http.HandleFunc("/call-to-all", n.callToAll)
-		http.HandleFunc("/is-leader", n.isLeader)
+		http.HandleFunc("/info", n.nodeInfo)
 		go http.ListenAndServe(n.localHost, nil)
 	})
 	log.Info("node started", zap.String("rpc-addr", n.rpcEndpoint), zap.String("local-host", n.localHost))
@@ -220,10 +221,14 @@ func (n *Node) callToAll(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (n *Node) isLeader(w http.ResponseWriter, _ *http.Request) {
-	if n.localPeer.IsLeader() {
-		w.Write([]byte("true"))
-	} else {
-		w.Write([]byte("false"))
+func (n *Node) nodeInfo(w http.ResponseWriter, _ *http.Request) {
+	isLeader := n.localPeer.IsLeader()
+	addrs, err := n.RemoteAddrs()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	currentTerm := n.localPeer.(*localPeer).consensus.term.Load()
+	info := fmt.Sprintf("isLeader: %v, currentTerm: %d\naddrs: %v\n", isLeader, currentTerm, addrs)
+	w.Write([]byte(info))
 }

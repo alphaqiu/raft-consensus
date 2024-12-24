@@ -11,6 +11,7 @@ type RemoteResolver interface {
 	RemoteAddrs() ([]string, error)
 	AddPeer(ctx context.Context, addr string) error
 	Peers() []Peer
+	RemovePeer(ctx context.Context, addr string) error
 }
 
 func NewMethods(logger *zap.Logger, resolver RemoteResolver) *Methods {
@@ -31,6 +32,7 @@ func (m *Methods) Hello(req *HelloRequest, resp *HelloResponse) error {
 		return err
 	}
 
+	m.logger.Info("Hello method starting to add remote peers", zap.Any("addrs", req.Addrs))
 	for _, addr := range req.Addrs {
 		if slices.Contains(addrs, addr) {
 			// m.logger.Info("Hello method already connected to this peer", zap.String("addr", addr))

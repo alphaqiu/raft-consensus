@@ -154,6 +154,7 @@ func (r *RaftConsensus) elect() {
 		zap.Int("peers", len(peers)),
 		zap.Uint64("term", r.term.Load()),
 	)
+	totalPeers := atomic.NewInt64(int64(len(peers)))
 	for _, peer := range peers {
 		peer := peer
 		group.Go(func() error {
@@ -165,6 +166,8 @@ func (r *RaftConsensus) elect() {
 			if err != nil {
 				r.logger.Info("raft consensus elect received vote response, peer call error", zap.String("id", r.id), zap.Error(err))
 				results <- resp
+				r.resolver.RemovePeer(ctx, peer.ID())
+				totalPeers.Dec()
 				return err
 			}
 
@@ -172,6 +175,8 @@ func (r *RaftConsensus) elect() {
 			case <-ctx.Done():
 				r.logger.Info("raft consensus elect received vote response, context done", zap.String("id", r.id))
 				results <- resp
+				r.resolver.RemovePeer(ctx, peer.ID())
+				totalPeers.Dec()
 				return ctx.Err()
 			case results <- resp:
 				// r.logger.Info("raft consensus elect received vote response",
@@ -184,7 +189,6 @@ func (r *RaftConsensus) elect() {
 		})
 	}
 
-	majority := int64((len(peers) + 1) / 2)
 	for result := range results {
 		// r.logger.Info("raft consensus elect received vote response", zap.Any("result", result))
 		if !result.VoteGranted && result.Term > r.term.Load() {
@@ -205,16 +209,22 @@ func (r *RaftConsensus) elect() {
 		}
 
 		r.votes.Inc()
+		majority := int64((totalPeers.Load() + 1) / 2)
 		if r.votes.Load() > majority {
 			r.logger.Info("won the election, become *LEADER*",
 				zap.String("id", r.id),
 				zap.Int64("votes", r.votes.Load()),
+				zap.Int64("majority", majority),
 				zap.Uint64("term", r.term.Load()),
 			)
 			r.state.Store(Leader)
 			r.votes.Store(0)
 			r.lastUpdated.Store(time.Now())
 			r.votedFor.Store("")
+
+			ctx, cancel := context.WithTimeout(context.Background(), DefaultHeartbeatInterval)
+			r.sendHeartbeat(ctx)
+			cancel()
 
 			return
 		}
@@ -233,7 +243,7 @@ func (r *RaftConsensus) heartbeat() {
 	// Leader 节点应当以多少的速率发送心跳包？
 	// 1. 如果 Leader 节点发送心跳包的速率太快，可能会导致 Follower 节点频繁地更新自己的状态，从而导致网络拥塞。
 	// 2. 如果 Leader 节点发送心跳包的速率太慢，可能会导致 Follower 节点无法及时地发现 Leader 节点的故障，从而导致整个集群的稳定性受到影响。
-	heartbeatTimer := time.NewTicker(DefaultHeartbeatInterval)
+	heartbeatTimer := time.NewTimer(DefaultHeartbeatInterval)
 	defer heartbeatTimer.Stop()
 
 	for {
@@ -244,12 +254,14 @@ func (r *RaftConsensus) heartbeat() {
 		case <-heartbeatTimer.C:
 			if r.state.Load() != Leader {
 				// r.logger.Info("raft consensus heartbeat not a leader, skip heartbeat to followers", zap.String("id", r.id))
+				heartbeatTimer.Reset(DefaultHeartbeatInterval)
 				continue
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), DefaultHeartbeatInterval)
 			r.sendHeartbeat(ctx)
 			cancel()
+			heartbeatTimer.Reset(DefaultHeartbeatInterval)
 		}
 	}
 }
@@ -262,11 +274,16 @@ func (r *RaftConsensus) sendHeartbeat(ctx context.Context) {
 		peer := peer
 		group.Go(func() error {
 			resp := &AppendEntriesResponse{}
-			peer.Call(ctx, "RaftConsensus.AppendEntries", &AppendEntriesRequest{
+			err := peer.Call(ctx, "RaftConsensus.AppendEntries", &AppendEntriesRequest{
 				Term:         r.term.Load(),
 				LeaderId:     r.id,
 				LeaderCommit: r.index.Load(),
 			}, resp)
+			if err != nil {
+				r.logger.Error("raft consensus send heartbeat to follower failed", zap.String("remote-id", peer.ID()), zap.Error(err))
+				r.resolver.RemovePeer(ctx, peer.ID())
+				return err
+			}
 			return nil
 		})
 	}
@@ -288,7 +305,6 @@ func (r *RaftConsensus) RequestVote(req *RequestVoteRequest, resp *RequestVoteRe
 			zap.String("id", r.id),
 			zap.String("remote-id", req.CandidateId),
 		)
-		r.term.Store(req.Term)
 		r.votedFor.Store(req.CandidateId)
 		resp.VoteGranted = true
 		resp.Term = r.term.Load()
